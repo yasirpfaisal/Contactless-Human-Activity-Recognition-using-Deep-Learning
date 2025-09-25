@@ -1,0 +1,119 @@
+import numpy as np
+import csv
+import time
+import winsound as sd
+import os
+from gnuradio import gr
+
+class csi_logger(gr.sync_block):
+    def __init__(self, vector_size=64):
+        gr.sync_block.__init__(
+            self,
+            name="CSI Logger",
+            in_sig=[(np.complex64, vector_size)],
+            out_sig=[]
+        )
+
+        self.vector_size = vector_size
+        self.sample_count = 0
+        self.frame_in_sample = 0
+        self.session_sample_count = 0
+        self.coords = "2.75,5.1" #(1,1.5)(3.5,1.5)(2.75,5.1)
+        self.action = "5"
+        self.steady_frames = 200       # 1 second @ 200 FPS
+        self.action_frames = 600       # 3 seconds @ 200 FPS
+        self.total_frames_per_sample = self.steady_frames + self.action_frames
+        self.samples_per_session = 51
+        self.frame_interval = 1.0 / 200.0  # 200 FPS
+
+        self.save_dir = r"C:\Users\fdzya\Desktop\mmu\YEAR 4\fyp\resources\own dataset\samples ori\G16\layout 3"
+        os.makedirs(self.save_dir, exist_ok=True)
+
+        safe_coords = self.coords.replace(',', '_').replace('.', '_')
+        self.csv_path = os.path.join(self.save_dir, f"csi_all_samples_G16_L3.csv")
+
+        try:
+            self.csv_file = open(self.csv_path, mode='a', newline='')
+        except PermissionError as e:
+            print(f"ERROR: Cannot open file {self.csv_path}. Please close it in Excel or another program.")
+            raise e
+
+        self.csv_writer = csv.writer(self.csv_file)
+
+        if self.csv_file.tell() == 0:
+            headers = ["Coordinates", "Action", "Frame", "FrameType", "Sample"]
+            headers += [f"Amp_dBm[{i}]" for i in range(self.vector_size)]
+            headers += [f"Phase_deg[{i}]" for i in range(self.vector_size)]
+            headers += ["RSSI_dBm"]
+            self.csv_writer.writerow(headers)
+
+        print("CSI Logger initialized.")
+        self.print_metadata()
+
+    def beep(self, freq=1000, duration=200):
+        try:
+            sd.Beep(freq, duration)
+        except:
+            print(f"Beep: {freq} Hz")
+
+    def print_metadata(self):
+        print(f"Coordinates: {self.coords}, Action: {self.action}")
+        print(f"Logging {self.samples_per_session} samples (each = {self.steady_frames} steady + {self.action_frames} action frames)")
+
+    def start_sample_beep(self):
+        print(f"\nSample {self.session_sample_count + 1} - Starting")
+        print("Start steady-state logging (1 second)")
+        time.sleep(1)
+        self.beep(freq=1000, duration=200)
+        print("Beep: Start activity logging")
+
+    def end_sample_beep(self):
+        print("End of logging (no beep)")
+
+    def process_frame(self, sample):
+        if self.session_sample_count >= self.samples_per_session:
+            print("✅ Session complete. No more samples will be recorded.")
+            return
+
+        if self.frame_in_sample == 0:
+            self.start_sample_beep()
+            self.sample_count += 1
+            self.session_sample_count += 1
+
+        self.frame_in_sample += 1
+        frame_type = "steady" if self.frame_in_sample <= self.steady_frames else "action"
+
+        amplitude = 20 * np.log10(np.abs(sample) + 1e-10)
+        phase = np.degrees(np.angle(sample))
+        rssi = np.mean(amplitude)
+
+        row = [self.coords, self.action, self.frame_in_sample, frame_type, self.sample_count]
+        row += amplitude.tolist()
+        row += phase.tolist()
+        row += [rssi]
+
+        self.csv_writer.writerow(row)
+        self.csv_file.flush()
+
+        print(f"Sample {self.sample_count} - Frame {self.frame_in_sample} ({frame_type}) logged.")
+
+        time.sleep(self.frame_interval)
+
+        if self.frame_in_sample >= self.total_frames_per_sample:
+            self.end_sample_beep()
+            self.frame_in_sample = 0
+            # No time.sleep() here for seamless transition to next sample
+
+    def work(self, input_items, output_items):
+        in0 = input_items[0]
+        for vector in in0:
+            self.process_frame(vector)
+        return len(in0)
+
+    def __del__(self):
+        print("Closing CSV file...")
+        try:
+            if hasattr(self, 'csv_file') and self.csv_file:
+                self.csv_file.close()
+        except:
+            pass
